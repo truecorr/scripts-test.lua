@@ -1,0 +1,121 @@
+local PathfindingService = game:GetService("PathfindingService")
+
+local npc = workspace:WaitForChild("PathFinderNPC")
+local humanoid = npc:WaitForChild("Humanoid")
+local root = npc:WaitForChild("HumanoidRootPart")
+local wallsFolder = workspace:WaitForChild("Walls")
+local pointsFolder = workspace:WaitForChild("PatrolPoints")
+
+-- Settings
+local VISION_RANGE = 50
+local FOV_ANGLE = 120 -- Degrees (Can't see behind)
+local ATTACK_RANGE = 5
+local DAMAGE_AMOUNT = 20
+local ATTACK_COOLDOWN = 3
+local OBSERVATION_TIME = 5
+
+local canAttack = true
+local lastPoint = nil 
+local currentDestination = nil
+local isObserving = false
+
+-- Function: Check if Player is in FOV and not behind a WallBP
+local function canSeePlayer(playerChar)
+	local playerRoot = playerChar:FindFirstChild("HumanoidRootPart")
+	if not playerRoot then return false end
+
+	local npcFacing = root.CFrame.LookVector
+	local toPlayer = (playerRoot.Position - root.Position).Unit
+	local angle = math.acos(npcFacing:Dot(toPlayer))
+
+	-- 1. Check Angle (FOV)
+	if math.deg(angle) > (FOV_ANGLE / 2) then
+		return false -- Player is behind or to the side
+	end
+
+	-- 2. Check Distance
+	local distance = (playerRoot.Position - root.Position).Magnitude
+	if distance > VISION_RANGE then return false end
+
+	-- 3. Raycast for Walls (The Fix)
+	local origin = root.Position + Vector3.new(0, 2, 0)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Include
+	-- Only care about Walls and the Character
+	rayParams.FilterDescendantsInstances = {playerChar, wallsFolder}
+
+	local result = workspace:Raycast(origin, toPlayer * distance, rayParams)
+
+	if result then
+		-- If it hits a WallBP, return false
+		if result.Instance.Name == "WallBP" or result.Instance:IsDescendantOf(wallsFolder) then
+			return false
+		elseif result.Instance:IsDescendantOf(playerChar) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Function: Get next point (Excluding the one behind it)
+local function getNextPoint()
+	local closest = nil
+	local lastDist = math.huge
+
+	for _, p in pairs(pointsFolder:GetChildren()) do
+		if p ~= lastPoint then
+			local d = (p.Position - root.Position).Magnitude
+			if d < lastDist then
+				lastDist = d
+				closest = p
+			end
+		end
+	end
+	return closest
+end
+
+-- Main Loop
+task.spawn(function()
+	while true do
+		local foundPlayer = nil
+
+		for _, player in pairs(game.Players:GetPlayers()) do
+			if player.Character and canSeePlayer(player.Character) then
+				foundPlayer = player.Character
+				isObserving = false
+				break
+			end
+		end
+
+		if foundPlayer then
+			-- CHASE
+			humanoid:MoveTo(foundPlayer.HumanoidRootPart.Position)
+			if (root.Position - foundPlayer.HumanoidRootPart.Position).Magnitude <= ATTACK_RANGE and canAttack then
+				canAttack = false
+				foundPlayer.Humanoid:TakeDamage(DAMAGE_AMOUNT)
+				task.wait(ATTACK_COOLDOWN)
+				canAttack = true
+			end
+		elseif not isObserving then
+			-- PATROL
+			if not currentDestination then
+				currentDestination = getNextPoint()
+			end
+
+			if currentDestination then
+				humanoid:MoveTo(currentDestination.Position)
+
+				if (root.Position - currentDestination.Position).Magnitude < 4 then
+					isObserving = true
+					lastPoint = currentDestination
+					currentDestination = nil
+
+					-- Observation phase: Look around 
+					task.wait(OBSERVATION_TIME)
+					isObserving = false
+				end
+			end
+		end
+		task.wait(0.1)
+	end
+end)
