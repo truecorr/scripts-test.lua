@@ -1,0 +1,27 @@
+local CollectionService = game:GetService("CollectionService")
+
+-- This function tags all walls so the NPC knows they block vision
+local function tagAllWalls()
+	for _, object in pairs(workspace:GetDescendants()) do
+		if object:IsA("BasePart") and object.Name == "WallBP" then
+			CollectionService:AddTag(object, "ObsidianWall")
+
+			-- Ensure physics are correct
+			object.Anchored = true
+			object.CanCollide = true
+
+			-- Optional: Visual confirmation in Studio output
+			print("Wall Registered: " .. object:GetFullName())
+		end
+	end
+end
+
+-- Run once when the server starts
+tagAllWalls()
+
+-- Also tag any new walls added to the game later
+workspace.DescendantAdded:Connect(function(descendant)
+	if descendant:IsA("BasePart") and descendant.Name == "WallBP" then
+		CollectionService:AddTag(descendant, "ObsidianWall")
+	end
+end)
