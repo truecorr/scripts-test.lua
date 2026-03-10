@@ -6,6 +6,7 @@ local function setupPatrolPoints()
 		if object:IsA("BasePart") and object.Name == "PathPointer" then
 			-- Tag it so the NPC can find all points instantly
 			CollectionService:AddTag(object, "PatrolBeacon")
+local TAG = "PatrolBeacon"
 
 			-- Ensure it's on the floor and doesn't move
 			object.Anchored = true
@@ -18,10 +19,22 @@ local function setupPatrolPoints()
 			lastVisitValue.Value = false
 			lastVisitValue.Parent = object
 		end
+local function configurePointer(part)
+	if not part:IsA("BasePart") or part.Name ~= "PathPointer" then
+		return
 	end
+
+	CollectionService:AddTag(part, TAG)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = true
+	part.CanTouch = false
 end
 
 setupPatrolPoints()
+for _, descendant in ipairs(workspace:GetDescendants()) do
+	configurePointer(descendant)
+end
 
 -- Watch for any new pointers added later
 workspace.DescendantAdded:Connect(function(descendant)
@@ -29,3 +42,4 @@ workspace.DescendantAdded:Connect(function(descendant)
 		CollectionService:AddTag(descendant, "PatrolBeacon")
 	end
 end)
+workspace.DescendantAdded:Connect(configurePointer)
