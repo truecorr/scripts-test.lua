@@ -1,4 +1,10 @@
+local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
+local CollectionService = game:GetService("CollectionService")
+
+-- NOTE:
+-- NPC AI works best in a normal Script on the server.
+-- This LocalScript version is kept compatible with your current file layout.
 
 local npc = workspace:WaitForChild("PathFinderNPC")
 local humanoid = npc:WaitForChild("Humanoid")
@@ -14,6 +20,24 @@ local DAMAGE_AMOUNT = 20
 local ATTACK_COOLDOWN = 3
 local OBSERVATION_TIME = 5
 
+local CONFIG = {
+	VisionRange = 70,
+	FieldOfView = 360, -- 360 allows detection in every direction
+	LostSightGrace = 1.5,
+	AttackRange = 4,
+	AttackDamage = 20,
+	AttackCooldown = 1.5,
+	PathRefresh = 0.45,
+	PatrolWait = 1.0,
+	WaypointReachDistance = 3,
+	AgentRadius = 2,
+	AgentHeight = 5,
+	AgentCanJump = true,
+}
+
+local state = "PATROL"
+local currentTarget = nil
+local lastSeenAt = 0
 local canAttack = true
 local lastPoint = nil 
 local currentDestination = nil
@@ -23,19 +47,45 @@ local isObserving = false
 local function canSeePlayer(playerChar)
 	local playerRoot = playerChar:FindFirstChild("HumanoidRootPart")
 	if not playerRoot then return false end
+local patrolPoints = {}
+local patrolIndex = 1
 
 	local npcFacing = root.CFrame.LookVector
 	local toPlayer = (playerRoot.Position - root.Position).Unit
 	local angle = math.acos(npcFacing:Dot(toPlayer))
+local activeWaypoints = nil
+local activeWaypointIndex = 1
+local currentGoal = nil
+local lastPathBuild = 0
 
 	-- 1. Check Angle (FOV)
 	if math.deg(angle) > (FOV_ANGLE / 2) then
 		return false -- Player is behind or to the side
+local function rebuildPatrolList()
+	patrolPoints = CollectionService:GetTagged("PatrolBeacon")
+	table.sort(patrolPoints, function(a, b)
+		return a.Name < b.Name
+	end)
+
+	if #patrolPoints == 0 then
+		for _, object in ipairs(workspace:GetDescendants()) do
+			if object:IsA("BasePart") and object.Name == "PathPointer" then
+				table.insert(patrolPoints, object)
+			end
+		end
+		table.sort(patrolPoints, function(a, b)
+			return a.Name < b.Name
+		end)
 	end
+end
 
 	-- 2. Check Distance
 	local distance = (playerRoot.Position - root.Position).Magnitude
 	if distance > VISION_RANGE then return false end
+local function isAlive(character)
+	local h = character and character:FindFirstChildOfClass("Humanoid")
+	return h and h.Health > 0
+end
 
 	-- 3. Raycast for Walls (The Fix)
 	local origin = root.Position + Vector3.new(0, 2, 0)
@@ -43,17 +93,50 @@ local function canSeePlayer(playerChar)
 	rayParams.FilterType = Enum.RaycastFilterType.Include
 	-- Only care about Walls and the Character
 	rayParams.FilterDescendantsInstances = {playerChar, wallsFolder}
+local function hasLineOfSight(character)
+	local targetRoot = character and character:FindFirstChild("HumanoidRootPart")
+	if not targetRoot then
+		return false
+	end
 
 	local result = workspace:Raycast(origin, toPlayer * distance, rayParams)
+	local offset = targetRoot.Position - root.Position
+	local distance = offset.Magnitude
+	if distance > CONFIG.VisionRange or distance <= 0.001 then
+		return false
+	end
 
 	if result then
 		-- If it hits a WallBP, return false
 		if result.Instance.Name == "WallBP" or result.Instance:IsDescendantOf(wallsFolder) then
+	if CONFIG.FieldOfView < 360 then
+		local dir = offset.Unit
+		local dot = math.clamp(root.CFrame.LookVector:Dot(dir), -1, 1)
+		local angle = math.deg(math.acos(dot))
+		if angle > CONFIG.FieldOfView * 0.5 then
 			return false
 		elseif result.Instance:IsDescendantOf(playerChar) then
 			return true
 		end
 	end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { npc }
+
+	local rayResult = workspace:Raycast(root.Position + Vector3.new(0, 2, 0), offset, rayParams)
+	if not rayResult then
+		return true
+	end
+
+	if rayResult.Instance:IsDescendantOf(character) then
+		return true
+	end
+
+	if CollectionService:HasTag(rayResult.Instance, "VisionBlocker") then
+		return false
+	end
+
 	return false
 end
 
@@ -68,16 +151,37 @@ local function getNextPoint()
 			if d < lastDist then
 				lastDist = d
 				closest = p
+local function getVisibleTarget()
+	local closestCharacter = nil
+	local closestDistance = math.huge
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		local character = player.Character
+		local targetRoot = character and character:FindFirstChild("HumanoidRootPart")
+		if targetRoot and isAlive(character) and hasLineOfSight(character) then
+			local d = (targetRoot.Position - root.Position).Magnitude
+			if d < closestDistance then
+				closestDistance = d
+				closestCharacter = character
 			end
 		end
 	end
 	return closest
+
+	return closestCharacter
 end
 
 -- Main Loop
 task.spawn(function()
 	while true do
 		local foundPlayer = nil
+local function buildPath(goalPosition)
+	local path = PathfindingService:CreatePath({
+		AgentRadius = CONFIG.AgentRadius,
+		AgentHeight = CONFIG.AgentHeight,
+		AgentCanJump = CONFIG.AgentCanJump,
+		WaypointSpacing = 4,
+	})
 
 		for _, player in pairs(game.Players:GetPlayers()) do
 			if player.Character and canSeePlayer(player.Character) then
@@ -85,7 +189,76 @@ task.spawn(function()
 				isObserving = false
 				break
 			end
+	local ok = pcall(function()
+		path:ComputeAsync(root.Position, goalPosition)
+	end)
+
+	if not ok or path.Status ~= Enum.PathStatus.Success then
+		return nil
+	end
+
+	return path:GetWaypoints()
+end
+
+local function setGoal(goalPosition)
+	currentGoal = goalPosition
+	activeWaypoints = buildPath(goalPosition)
+	activeWaypointIndex = 1
+	lastPathBuild = time()
+end
+
+local function updateMovement(goalPosition)
+	if not goalPosition then
+		return
+	end
+
+	if not currentGoal
+		or (currentGoal - goalPosition).Magnitude > 4
+		or not activeWaypoints
+		or time() - lastPathBuild >= CONFIG.PathRefresh then
+		setGoal(goalPosition)
+	end
+
+	if not activeWaypoints or #activeWaypoints == 0 then
+		humanoid:MoveTo(goalPosition)
+		return
+	end
+
+	local waypoint = activeWaypoints[activeWaypointIndex]
+	if not waypoint then
+		humanoid:MoveTo(goalPosition)
+		return
+	end
+
+	if waypoint.Action == Enum.PathWaypointAction.Jump then
+		humanoid.Jump = true
+	end
+
+	humanoid:MoveTo(waypoint.Position)
+
+	if (root.Position - waypoint.Position).Magnitude <= CONFIG.WaypointReachDistance then
+		activeWaypointIndex += 1
+	end
+end
+
+local function getCurrentPatrolPoint()
+	if #patrolPoints == 0 then
+		return nil
+	end
+	if patrolIndex > #patrolPoints then
+		patrolIndex = 1
+	end
+	return patrolPoints[patrolIndex]
+end
+
+local function advancePatrol()
+	if #patrolPoints > 0 then
+		patrolIndex += 1
+		if patrolIndex > #patrolPoints then
+			patrolIndex = 1
 		end
+	end
+end
 
 		if foundPlayer then
 			-- CHASE
@@ -101,21 +274,62 @@ task.spawn(function()
 			if not currentDestination then
 				currentDestination = getNextPoint()
 			end
+CollectionService:GetInstanceAddedSignal("PatrolBeacon"):Connect(rebuildPatrolList)
+CollectionService:GetInstanceRemovedSignal("PatrolBeacon"):Connect(rebuildPatrolList)
+rebuildPatrolList()
 
 			if currentDestination then
 				humanoid:MoveTo(currentDestination.Position)
+humanoid.AutoRotate = true
 
 				if (root.Position - currentDestination.Position).Magnitude < 4 then
 					isObserving = true
 					lastPoint = currentDestination
 					currentDestination = nil
+while task.wait(0.1) do
+	local visibleTarget = getVisibleTarget()
 
 					-- Observation phase: Look around 
 					task.wait(OBSERVATION_TIME)
 					isObserving = false
 				end
+	if visibleTarget then
+		currentTarget = visibleTarget
+		lastSeenAt = time()
+		state = "CHASE"
+	elseif state == "CHASE" and time() - lastSeenAt > CONFIG.LostSightGrace then
+		currentTarget = nil
+		state = "PATROL"
+		activeWaypoints = nil
+	end
+
+	if state == "CHASE" and currentTarget and isAlive(currentTarget) then
+		local targetRoot = currentTarget:FindFirstChild("HumanoidRootPart")
+		if targetRoot then
+			updateMovement(targetRoot.Position)
+
+			local targetHumanoid = currentTarget:FindFirstChildOfClass("Humanoid")
+			if targetHumanoid and canAttack and (root.Position - targetRoot.Position).Magnitude <= CONFIG.AttackRange then
+				canAttack = false
+				targetHumanoid:TakeDamage(CONFIG.AttackDamage)
+				task.delay(CONFIG.AttackCooldown, function()
+					canAttack = true
+				end)
+			end
+		end
+	else
+		state = "PATROL"
+		local patrolPoint = getCurrentPatrolPoint()
+		if patrolPoint and patrolPoint:IsDescendantOf(workspace) then
+			updateMovement(patrolPoint.Position)
+			if (root.Position - patrolPoint.Position).Magnitude <= CONFIG.WaypointReachDistance + 1 then
+				humanoid:MoveTo(root.Position)
+				task.wait(CONFIG.PatrolWait)
+				advancePatrol()
+				activeWaypoints = nil
 			end
 		end
 		task.wait(0.1)
 	end
 end)
+end
