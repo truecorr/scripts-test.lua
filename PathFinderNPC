@@ -1,0 +1,115 @@
+local PathfindingService = game:GetService("PathfindingService")
+local CollectionService = game:GetService("CollectionService")
+
+local npc = script.Parent
+local humanoid = npc:WaitForChild("Humanoid")
+local root = npc:WaitForChild("HumanoidRootPart")
+
+-- Settings
+local VISION_RANGE = 45
+local FOV_ANGLE = 120 
+local ATTACK_RANGE = 5
+local DAMAGE = 20
+local ATTACK_COOLDOWN = 3
+local OBSERVATION_TIME = 5
+
+local canAttack = true
+local lastPoint = nil
+local currentDestination = nil -- Lock in the point
+local isObserving = false
+
+local function canSeePlayer(playerChar)
+	local targetRoot = playerChar:FindFirstChild("HumanoidRootPart")
+	if not targetRoot then return false end
+
+	local toPlayer = (targetRoot.Position - root.Position).Unit
+	local angle = math.deg(math.acos(root.CFrame.LookVector:Dot(toPlayer)))
+	if angle > (FOV_ANGLE / 2) then return false end 
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Include
+	local filter = {playerChar}
+	for _, wall in pairs(CollectionService:GetTagged("ObsidianWall")) do
+		table.insert(filter, wall)
+	end
+	rayParams.FilterDescendantsInstances = filter
+
+	local result = workspace:Raycast(root.Position + Vector3.new(0, 2, 0), toPlayer * VISION_RANGE, rayParams)
+	return result and result.Instance:IsDescendantOf(playerChar)
+end
+
+local function getNextForwardPoint()
+	local beacons = CollectionService:GetTagged("PatrolBeacon")
+	local bestPoint = nil
+	local minDistance = math.huge
+
+	for _, b in pairs(beacons) do
+		if b ~= lastPoint then
+			local toPoint = (b.Position - root.Position).Unit
+			local angleToPoint = math.deg(math.acos(root.CFrame.LookVector:Dot(toPoint)))
+
+			-- Only points in front
+			if angleToPoint < 90 then
+				local dist = (b.Position - root.Position).Magnitude
+				if dist < minDistance then
+					minDistance = dist
+					bestPoint = b
+				end
+			end
+		end
+	end
+
+	-- Fallback if nothing is in front
+	if not bestPoint then
+		for _, b in pairs(beacons) do
+			if b ~= lastPoint then
+				local d = (b.Position - root.Position).Magnitude
+				if d < minDistance then minDistance = d bestPoint = b end
+			end
+		end
+	end
+	return bestPoint
+end
+
+task.spawn(function()
+	while true do
+		local target = nil
+		for _, p in pairs(game.Players:GetPlayers()) do
+			if p.Character and canSeePlayer(p.Character) then
+				target = p.Character
+				isObserving = false
+				currentDestination = nil -- Stop patrolling to chase
+				break
+			end
+		end
+
+		if target then
+			humanoid:MoveTo(target.HumanoidRootPart.Position)
+			if (root.Position - target.HumanoidRootPart.Position).Magnitude < ATTACK_RANGE and canAttack then
+				canAttack = false
+				target.Humanoid:TakeDamage(DAMAGE)
+				task.wait(ATTACK_COOLDOWN)
+				canAttack = true
+			end
+		elseif not isObserving then
+			-- Lock in a destination so it doesn't stutter
+			if not currentDestination then
+				currentDestination = getNextForwardPoint()
+			end
+
+			if currentDestination then
+				humanoid:MoveTo(currentDestination.Position)
+
+				if (root.Position - currentDestination.Position).Magnitude < 4 then
+					isObserving = true
+					lastPoint = currentDestination
+					currentDestination = nil -- Clear so it finds a new one after waiting
+
+					task.wait(OBSERVATION_TIME)
+					isObserving = false
+				end
+			end
+		end
+		task.wait(0.1)
+	end
+end)
