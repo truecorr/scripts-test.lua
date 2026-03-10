@@ -1,0 +1,31 @@
+local CollectionService = game:GetService("CollectionService")
+
+-- This function prepares the patrol network
+local function setupPatrolPoints()
+	for _, object in pairs(workspace:GetDescendants()) do
+		if object:IsA("BasePart") and object.Name == "PathPointer" then
+			-- Tag it so the NPC can find all points instantly
+			CollectionService:AddTag(object, "PatrolBeacon")
+
+			-- Ensure it's on the floor and doesn't move
+			object.Anchored = true
+			object.CanCollide = false -- NPC can walk through the visual marker
+			object.Transparency = 0.5 -- Make it slightly see-through if you want
+
+			-- Add a Custom Property to track if it was the "last" point
+			local lastVisitValue = object:FindFirstChild("LastVisited") or Instance.new("BoolValue")
+			lastVisitValue.Name = "LastVisited"
+			lastVisitValue.Value = false
+			lastVisitValue.Parent = object
+		end
+	end
+end
+
+setupPatrolPoints()
+
+-- Watch for any new pointers added later
+workspace.DescendantAdded:Connect(function(descendant)
+	if descendant:IsA("BasePart") and descendant.Name == "PathPointer" then
+		CollectionService:AddTag(descendant, "PatrolBeacon")
+	end
+end)
